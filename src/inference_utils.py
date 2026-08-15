@@ -65,13 +65,23 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def encode_with_saved_encoders(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
     """Applies previously-fitted LabelEncoders. Unseen categories are mapped
-    to a fallback code (-1 handled via a safe transform)."""
+        to a fallback code (-1 handled via a safe transform)."""
     df = df.copy()
+
     for col, le in encoders.items():
-        known = set(le.classes_)
-        df[col + "_enc"] = df[col].astype(str).apply(
-            lambda x: le.transform([x])[0] if x in known else -1
+        mapping = {
+            str(cls): idx
+            for idx, cls in enumerate(le.classes_)
+        }
+
+        df[col + "_enc"] = (
+            df[col]
+            .astype(str)
+            .map(mapping)
+            .fillna(-1)
+            .astype(np.int32)
         )
+
     return df
 
 
@@ -80,22 +90,48 @@ def bootstrap_history(new_df: pd.DataFrame, historical_df: pd.DataFrame) -> pd.D
     features would be mostly zero), prepend matching historical rows so lag
     features are meaningful. historical_df is the engineered training data
     artifact (historical_engineered.parquet)."""
-    keys = new_df[GROUP_COLS].drop_duplicates()
-    hist_subset = historical_df.merge(keys, on=GROUP_COLS, how="inner")
+    """Add matching historical rows needed for lag/rolling features."""
 
-    # keep only raw columns needed to re-run feature engineering cleanly
     raw_cols = [
         DATE_COL, "Store ID", "Product ID", "Category", "Region",
         "Inventory Level", "Units Sold", "Units Ordered", "Price", "Discount",
         "Weather Condition", "Promotion", "Competitor Pricing", "Seasonality",
         "Epidemic", TARGET
     ]
-    hist_subset = hist_subset[[c for c in raw_cols if c in hist_subset.columns]]
-    new_raw = new_df[[c for c in raw_cols if c in new_df.columns]]
 
-    combined = pd.concat([hist_subset, new_raw], ignore_index=True)
-    combined = combined.drop_duplicates(subset=GROUP_COLS + [DATE_COL], keep="last")
-    combined = combined.sort_values(GROUP_COLS + [DATE_COL]).reset_index(drop=True)
+    # Only keep the columns actually needed BEFORE merging.
+    available_cols = [c for c in raw_cols if c in historical_df.columns]
+    historical_raw = historical_df[available_cols].copy()
+
+    # Get only the unique store/product combinations from the upload.
+    keys = new_df[GROUP_COLS].drop_duplicates()
+
+    # Filter historical data to only matching store/product combinations.
+    hist_subset = historical_raw.merge(
+        keys,
+        on=GROUP_COLS,
+        how="inner"
+    )
+
+    # Only keep raw columns from the uploaded file.
+    new_raw = new_df[
+        [c for c in raw_cols if c in new_df.columns]
+    ].copy()
+
+    combined = pd.concat(
+        [hist_subset, new_raw],
+        ignore_index=True
+    )
+
+    combined = combined.drop_duplicates(
+        subset=GROUP_COLS + [DATE_COL],
+        keep="last"
+    )
+
+    combined = combined.sort_values(
+        GROUP_COLS + [DATE_COL]
+    ).reset_index(drop=True)
+
     return combined
 
 

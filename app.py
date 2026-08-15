@@ -10,7 +10,6 @@ Expects trained model artifacts in ./artifacts/ (produced by src/train_model.py)
   - metrics.json
   - historical_engineered.parquet
 """
-data\sales_data.csv
 
 import streamlit as st
 import pandas as pd
@@ -182,14 +181,32 @@ def load_historical():
 @st.cache_data(show_spinner=False)
 def run_pipeline(raw_df: pd.DataFrame, _encoders, feature_cols, _model, historical_df):
     """Full pipeline: bootstrap history -> engineer features -> encode -> predict."""
+
+    print("RAW:", raw_df.shape, 
+      raw_df.memory_usage(deep=True).sum() / 1024**2, "MB")
+    
     if historical_df is not None:
         combined_raw = bootstrap_history(raw_df, historical_df)
     else:
         combined_raw = raw_df.copy()
 
+    print("COMBINED:", combined_raw.shape,
+      combined_raw.memory_usage(deep=True).sum() / 1024**2, "MB")
+
     engineered = engineer_features(combined_raw)
+
+    print("ENGINEERED:", engineered.shape,
+      engineered.memory_usage(deep=True).sum() / 1024**2, "MB")
+    
     encoded = encode_with_saved_encoders(engineered, _encoders)
+
+    print("ENCODED:", encoded.shape,
+      encoded.memory_usage(deep=True).sum() / 1024**2, "MB")
+    
     preds = predict_demand(_model, encoded, feature_cols)
+
+    print("PREDICTIONS COMPLETE")
+    
     encoded["Predicted_Demand"] = preds
 
     upload_keys = raw_df[GROUP_COLS + [DATE_COL]].copy()
