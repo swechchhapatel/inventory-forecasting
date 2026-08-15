@@ -178,50 +178,138 @@ def load_historical():
     return None
 
 
-@st.cache_data(show_spinner=False)
-def run_pipeline(raw_df: pd.DataFrame, _encoders, feature_cols, _model, historical_df):
-    """Full pipeline: bootstrap history -> engineer features -> encode -> predict."""
+@st.cache_data(show_spinner=False, max_entries=1)
+def run_pipeline(raw_df: pd.DataFrame, _encoders, feature_cols, _model, historical_df,):
+    """
+    Full prediction pipeline.
 
-    print("RAW:", raw_df.shape, 
-      raw_df.memory_usage(deep=True).sum() / 1024**2, "MB")
-    
+    Historical rows are used to calculate lag/rolling features,
+    but only uploaded rows are encoded and passed to XGBoost.
+    This significantly reduces peak memory usage.
+    """
+
+    import gc
+
+    # ---------------------------------------------------------------
+    # 1. Combine uploaded data with relevant historical data
+    # ---------------------------------------------------------------
     if historical_df is not None:
-        combined_raw = bootstrap_history(raw_df, historical_df)
+        combined_raw = bootstrap_history(
+            raw_df,
+            historical_df,
+        )
     else:
         combined_raw = raw_df.copy()
+        combined_raw["__is_uploaded"] = True
 
-    print("COMBINED:", combined_raw.shape,
-      combined_raw.memory_usage(deep=True).sum() / 1024**2, "MB")
+    # Calculate history counts before releasing combined_raw.
+    hist_counts = (
+        combined_raw
+        .groupby(GROUP_COLS)
+        .size()
+        .rename("history_days")
+        .reset_index()
+    )
 
+    # ---------------------------------------------------------------
+    # 2. Feature engineering
+    #
+    # We MUST engineer features on the complete dataset because
+    # historical rows are needed for lag/rolling calculations.
+    # ---------------------------------------------------------------
     engineered = engineer_features(combined_raw)
 
-    print("ENGINEERED:", engineered.shape,
-      engineered.memory_usage(deep=True).sum() / 1024**2, "MB")
-    
-    encoded = encode_with_saved_encoders(engineered, _encoders)
+    # combined_raw is no longer needed.
+    del combined_raw
+    gc.collect()
 
-    print("ENCODED:", encoded.shape,
-      encoded.memory_usage(deep=True).sum() / 1024**2, "MB")
-    
-    preds = predict_demand(_model, encoded, feature_cols)
+    # ---------------------------------------------------------------
+    # 3. Keep ONLY uploaded rows
+    #
+    # Historical rows have already done their job:
+    # they provided the history required for lag/rolling features.
+    #
+    # We do NOT need to encode or predict them.
+    # ---------------------------------------------------------------
+    uploaded_mask = engineered["__is_uploaded"].to_numpy()
 
-    print("PREDICTIONS COMPLETE")
-    
+    prediction_df = (
+        engineered.loc[uploaded_mask]
+        .drop(columns=["__is_uploaded"])
+        .copy()
+    )
+
+    # Release the 152k-row engineered DataFrame.
+    del engineered
+    del uploaded_mask
+    gc.collect()
+
+    # ---------------------------------------------------------------
+    # 4. Encode ONLY the uploaded rows
+    # ---------------------------------------------------------------
+    encoded = encode_with_saved_encoders(
+        prediction_df,
+        _encoders,
+    )
+
+    del prediction_df
+    gc.collect()
+
+    # ---------------------------------------------------------------
+    # 5. Predict ONLY uploaded rows
+    # ---------------------------------------------------------------
+    preds = predict_demand(
+        _model,
+        encoded,
+        feature_cols,
+    )
+
     encoded["Predicted_Demand"] = preds
 
-    upload_keys = raw_df[GROUP_COLS + [DATE_COL]].copy()
-    upload_keys[DATE_COL] = pd.to_datetime(upload_keys[DATE_COL])
-    encoded[DATE_COL] = pd.to_datetime(encoded[DATE_COL])
-    result = encoded.merge(upload_keys, on=GROUP_COLS + [DATE_COL], how="inner")
+    del preds
+    gc.collect()
 
-    # how many historical rows (pre-upload) each store-item had available --
-    # used later for the confidence heuristic
-    hist_counts = (
-        combined_raw.groupby(GROUP_COLS).size().rename("history_days").reset_index()
+    # ---------------------------------------------------------------
+    # 6. Reattach uploaded keys
+    #
+    # This preserves the original app behavior of returning the
+    # uploaded records rather than historical records.
+    # ---------------------------------------------------------------
+    upload_keys = raw_df[
+        GROUP_COLS + [DATE_COL]
+    ].copy()
+
+    upload_keys[DATE_COL] = pd.to_datetime(
+        upload_keys[DATE_COL]
     )
-    result = result.merge(hist_counts, on=GROUP_COLS, how="left")
-    return result
 
+    encoded[DATE_COL] = pd.to_datetime(
+        encoded[DATE_COL]
+    )
+
+    result = encoded.merge(
+        upload_keys,
+        on=GROUP_COLS + [DATE_COL],
+        how="inner",
+    )
+
+    del encoded
+    del upload_keys
+    gc.collect()
+
+    # ---------------------------------------------------------------
+    # 7. Add history count used by the confidence calculation
+    # ---------------------------------------------------------------
+    result = result.merge(
+        hist_counts,
+        on=GROUP_COLS,
+        how="left",
+    )
+
+    del hist_counts
+    gc.collect()
+
+    return result
 
 def stock_health_gauge(days_left: float, alert_level: str, max_days: float = 21):
     """A simple ring gauge showing days-of-stock-left at a glance."""
