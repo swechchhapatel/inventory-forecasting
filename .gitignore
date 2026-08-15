@@ -1,5 +1,4 @@
 api/api_keys.json
-artifacts/
 data/*.csv
 __pycache__/
 *.pyc
