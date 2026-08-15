@@ -10,7 +10,6 @@ Expects trained model artifacts in ./artifacts/ (produced by src/train_model.py)
   - metrics.json
   - historical_engineered.parquet
 """
-data\sales_data.csv
 
 import streamlit as st
 import pandas as pd
