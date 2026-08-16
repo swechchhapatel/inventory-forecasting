@@ -146,11 +146,12 @@ app.add_middleware(
 @lru_cache(maxsize=1)
 def get_model():
     import xgboost as xgb
-    path = xgb.XGBRegressor()
-    path.load_model(os.path.join(ARTIFACT_DIR, "xgb_demand_model.json"))
-    if not os.path.exists(path):
-        raise RuntimeError(f"Model artifact not found at {path}")
-    return joblib.load(path)
+    model_path = os.path.join(ARTIFACT_DIR, "xgb_demand_model.json")
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"Model artifact not found at {model_path}")
+    model = xgb.XGBRegressor()
+    model.load_model(model_path)
+    return model
 
 
 @lru_cache(maxsize=1)
