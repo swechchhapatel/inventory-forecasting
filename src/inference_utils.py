@@ -63,48 +63,145 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def encode_with_saved_encoders(df: pd.DataFrame, encoders: dict) -> pd.DataFrame:
-    """Applies previously-fitted LabelEncoders. Unseen categories are mapped
-    to a fallback code (-1 handled via a safe transform)."""
+def encode_with_saved_encoders(df: pd.DataFrame,encoders: dict) -> pd.DataFrame:
+    """Apply previously fitted LabelEncoders using vectorized pandas mapping.
+    This is considerably more memory/CPU efficient than calling
+    le.transform() once for every individual cell.
+    """
+
     df = df.copy()
+
     for col, le in encoders.items():
-        known = set(le.classes_)
-        df[col + "_enc"] = df[col].astype(str).apply(
-            lambda x: le.transform([x])[0] if x in known else -1
+        mapping = {
+            str(cls): idx
+            for idx, cls in enumerate(le.classes_)
+        }
+
+        df[col + "_enc"] = (
+            df[col]
+            .astype(str)
+            .map(mapping)
+            .fillna(-1)
+            .astype(np.int32)
         )
+
     return df
 
 
 def bootstrap_history(new_df: pd.DataFrame, historical_df: pd.DataFrame) -> pd.DataFrame:
-    """If the uploaded CSV has limited history per store-item (so lag/rolling
-    features would be mostly zero), prepend matching historical rows so lag
-    features are meaningful. historical_df is the engineered training data
-    artifact (historical_engineered.parquet)."""
-    keys = new_df[GROUP_COLS].drop_duplicates()
-    hist_subset = historical_df.merge(keys, on=GROUP_COLS, how="inner")
+    """
+    Combine the required historical rows with the uploaded rows.
 
-    # keep only raw columns needed to re-run feature engineering cleanly
+    Historical rows are used ONLY to calculate lag/rolling features.
+    The __is_uploaded marker lets run_pipeline() later discard the
+    historical rows before encoding and prediction.
+    """
+
     raw_cols = [
-        DATE_COL, "Store ID", "Product ID", "Category", "Region",
-        "Inventory Level", "Units Sold", "Units Ordered", "Price", "Discount",
-        "Weather Condition", "Promotion", "Competitor Pricing", "Seasonality",
-        "Epidemic", TARGET
+        DATE_COL,
+        "Store ID",
+        "Product ID",
+        "Category",
+        "Region",
+        "Inventory Level",
+        "Units Sold",
+        "Units Ordered",
+        "Price",
+        "Discount",
+        "Weather Condition",
+        "Promotion",
+        "Competitor Pricing",
+        "Seasonality",
+        "Epidemic",
+        TARGET,
     ]
-    hist_subset = hist_subset[[c for c in raw_cols if c in hist_subset.columns]]
-    new_raw = new_df[[c for c in raw_cols if c in new_df.columns]]
 
-    combined = pd.concat([hist_subset, new_raw], ignore_index=True)
-    combined = combined.drop_duplicates(subset=GROUP_COLS + [DATE_COL], keep="last")
-    combined = combined.sort_values(GROUP_COLS + [DATE_COL]).reset_index(drop=True)
+    # Only select the raw columns needed for feature engineering.
+    # This avoids carrying all 47 columns from historical_engineered.parquet
+    # through the merge.
+    available_hist_cols = [
+        c for c in raw_cols
+        if c in historical_df.columns
+    ]
+
+    historical_raw = historical_df.loc[:, available_hist_cols].copy()
+
+    # Only historical records belonging to store/product combinations
+    # present in the uploaded file are needed.
+    keys = new_df[GROUP_COLS].drop_duplicates()
+
+    hist_subset = historical_raw.merge(
+        keys,
+        on=GROUP_COLS,
+        how="inner",
+        sort=False,
+    )
+
+    # Mark historical rows.
+    hist_subset["__is_uploaded"] = False
+
+    # Keep only the raw columns needed from the uploaded data.
+    available_new_cols = [
+        c for c in raw_cols
+        if c in new_df.columns
+    ]
+
+    new_raw = new_df.loc[:, available_new_cols].copy()
+
+    # Mark uploaded rows.
+    new_raw["__is_uploaded"] = True
+
+    # Historical first, uploaded second.
+    # Therefore if the exact same Store/Product/Date occurs in both,
+    # the uploaded row wins because drop_duplicates(... keep="last")
+    # is used below.
+    combined = pd.concat(
+        [hist_subset, new_raw],
+        ignore_index=True,
+        copy=False,
+    )
+
+    del historical_raw
+    del hist_subset
+    del new_raw
+
+    combined = combined.drop_duplicates(
+        subset=GROUP_COLS + [DATE_COL],
+        keep="last",
+    )
+
+    combined = combined.sort_values(
+        GROUP_COLS + [DATE_COL]
+    ).reset_index(drop=True)
+
     return combined
 
 
 def predict_demand(model, df_encoded: pd.DataFrame, feature_cols: list) -> np.ndarray:
-    missing = [c for c in feature_cols if c not in df_encoded.columns]
+    """Predict demand using only the required model features."""
+
+    missing = [
+        c for c in feature_cols
+        if c not in df_encoded.columns
+    ]
+
     if missing:
-        raise ValueError(f"Missing required feature columns: {missing}")
-    preds = model.predict(df_encoded[feature_cols])
-    return np.clip(preds, 0, None)
+        raise ValueError(
+            f"Missing required feature columns: {missing}"
+        )
+
+    # Only pass the model's required columns to XGBoost.
+    X = df_encoded.loc[:, feature_cols]
+
+    preds = model.predict(X)
+
+    del X
+
+    return np.clip(
+        preds,
+        0,
+        None,
+    )
 
 
 # -----------------------------------------------------------------------
@@ -118,37 +215,73 @@ def generate_alerts(
     warning_days_threshold: float = 7,
 ) -> pd.DataFrame:
     """
-    Given a dataframe with one row per store-item (latest snapshot) containing:
-        - Inventory Level (current stock)
-        - Predicted_Demand (forecasted daily demand, e.g. avg of next N days)
-    computes:
-        - days_of_stock_left
-        - reorder_point (lead_time + safety_stock, in units)
-        - recommended_order_qty
-        - alert_level (Critical / Warning / OK / Overstock)
+    Calculate stock health and reorder recommendations.
+
+    Uses vectorized pandas/numpy operations to reduce memory and CPU
+    compared with row-by-row DataFrame.apply().
     """
+
     df = df.copy()
-    daily_demand = df["Predicted_Demand"].replace(0, np.nan)
 
-    df["days_of_stock_left"] = (df["Inventory Level"] / daily_demand).fillna(np.inf)
-    df["reorder_point_units"] = daily_demand.fillna(0) * (lead_time_days + safety_stock_days)
+    daily_demand = df["Predicted_Demand"].replace(
+        0,
+        np.nan,
+    )
 
-    # Recommended order = bring stock up to cover lead time + safety stock,
-    # topped up beyond what's already on hand
-    target_stock = daily_demand.fillna(0) * (lead_time_days + safety_stock_days)
-    df["recommended_order_qty"] = np.maximum(target_stock - df["Inventory Level"], 0).round().astype(int)
+    # Days of stock remaining.
+    df["days_of_stock_left"] = (
+        df["Inventory Level"] / daily_demand
+    ).fillna(np.inf)
 
-    def classify(row):
-        days_left = row["days_of_stock_left"]
-        if row["Predicted_Demand"] <= 0:
-            return "OK"
-        if days_left <= critical_days_threshold:
-            return "Critical"
-        if days_left <= warning_days_threshold:
-            return "Warning"
-        if days_left > warning_days_threshold * 4:
-            return "Overstock"
-        return "OK"
+    # Lead time + safety stock target.
+    target_days = (
+        lead_time_days +
+        safety_stock_days
+    )
 
-    df["alert_level"] = df.apply(classify, axis=1)
+    df["reorder_point_units"] = (
+        daily_demand.fillna(0) * target_days
+    )
+
+    # Recommended order quantity.
+    target_stock = (
+        daily_demand.fillna(0) * target_days
+    )
+
+    df["recommended_order_qty"] = (
+        np.maximum(
+            target_stock - df["Inventory Level"],
+            0,
+        )
+        .round()
+        .astype(int)
+    )
+
+    # ---------------------------------------------------------------
+    # Vectorized alert classification
+    # ---------------------------------------------------------------
+    df["alert_level"] = "OK"
+
+    positive_demand = df["Predicted_Demand"] > 0
+
+    critical_mask = (
+        positive_demand &
+        (df["days_of_stock_left"] <= critical_days_threshold)
+    )
+
+    warning_mask = (
+        positive_demand &
+        (df["days_of_stock_left"] > critical_days_threshold) &
+        (df["days_of_stock_left"] <= warning_days_threshold)
+    )
+
+    overstock_mask = (
+        positive_demand &
+        (df["days_of_stock_left"] > warning_days_threshold * 4)
+    )
+
+    df.loc[critical_mask, "alert_level"] = "Critical"
+    df.loc[warning_mask, "alert_level"] = "Warning"
+    df.loc[overstock_mask, "alert_level"] = "Overstock"
+
     return df
