@@ -10,7 +10,6 @@ Expects trained model artifacts in ./artifacts/ (produced by src/train_model.py)
   - metrics.json
   - historical_engineered.parquet
 """
-data\sales_data.csv
 
 import streamlit as st
 import pandas as pd
@@ -182,6 +181,7 @@ def load_historical():
 @st.cache_data(show_spinner=False)
 def run_pipeline(raw_df: pd.DataFrame, _encoders, feature_cols, _model, historical_df):
     """Full pipeline: bootstrap history -> engineer features -> encode -> predict."""
+    
     if historical_df is not None:
         combined_raw = bootstrap_history(raw_df, historical_df)
     else:
