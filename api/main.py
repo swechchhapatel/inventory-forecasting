@@ -63,29 +63,34 @@ ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "artifacts")
 # The API refuses to start if this file is missing or empty -- intentional,
 # so it's impossible to accidentally run the API with no authentication.
 API_KEYS_PATH = os.environ.get("STORE_STOCK_API_KEYS_PATH", os.path.join(os.path.dirname(__file__), "api_keys.json"))
+API_KEYS_JSON_ENV = os.environ.get("STORE_STOCK_API_KEYS_JSON")  # e.g. '{"website": "secret123"}'
 
 
-def _load_api_keys(path: str) -> dict:
-    if not os.path.exists(path):
-        raise RuntimeError(
-            f"API keys file not found at {path}.\n"
-            f"Copy api/api_keys.json.example to api/api_keys.json and fill in "
-            f"real secret values before starting the server."
-        )
-    with open(path) as f:
+def _load_api_keys() -> dict:
+    # Prefer an env var (used on hosting platforms like Render, where committing
+    # a keys file isn't desired) -- falls back to the local file for local dev.
+    if API_KEYS_JSON_ENV:
         try:
-            keys = json.load(f)
+            keys = json.loads(API_KEYS_JSON_ENV)
         except json.JSONDecodeError as e:
-            raise RuntimeError(f"API keys file at {path} is not valid JSON: {e}")
-    if not keys or not isinstance(keys, dict):
+            raise RuntimeError(f"STORE_STOCK_API_KEYS_JSON env var is not valid JSON: {e}")
+    elif os.path.exists(API_KEYS_PATH):
+        with open(API_KEYS_PATH) as f:
+            try:
+                keys = json.load(f)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"API keys file at {API_KEYS_PATH} is not valid JSON: {e}")
+    else:
         raise RuntimeError(
-            f"API keys file at {path} is empty or malformed. "
-            f"Expected format: {{\"client-name\": \"secret-key\", ...}}"
+            "No API keys found. Either set the STORE_STOCK_API_KEYS_JSON environment "
+            "variable, or create api/api_keys.json locally (copy api_keys.json.example)."
         )
+    if not keys or not isinstance(keys, dict):
+        raise RuntimeError("API keys are empty or malformed. Expected: {\"client-name\": \"secret-key\", ...}")
     return keys
 
 
-API_KEYS = _load_api_keys(API_KEYS_PATH)  # {client_name: key}
+API_KEYS = _load_api_keys()
 _KEY_TO_CLIENT = {v: k for k, v in API_KEYS.items()}  # reverse lookup: key -> client_name
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
