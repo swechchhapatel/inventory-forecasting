@@ -39,10 +39,9 @@ import xgboost as xgb
 # -----------------------------------------------------------------------
 # CONFIG
 # -----------------------------------------------------------------------
-DATA_PATH = "/kaggle/input/retail-store-inventory-and-demand-forecasting/retail_store_inventory.csv"
-# If running locally with the CSV downloaded manually, change to e.g. "data/retail_store_inventory.csv"
+DATA_PATH = "data\\sales_data.csv"
 
-ARTIFACT_DIR = "/kaggle/working/artifacts"   # change to "artifacts" if running locally
+ARTIFACT_DIR = "artifacts"   # change to "artifacts" if running locally
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 TARGET = "Demand"
@@ -245,7 +244,7 @@ def main():
     # -----------------------------------------------------------------
     # SAVE ARTIFACTS
     # -----------------------------------------------------------------
-    joblib.dump(model, f"{ARTIFACT_DIR}/xgb_demand_model.pkl")
+    model.save_model(f"{ARTIFACT_DIR}/xgb_demand_model.json")
     joblib.dump(encoders, f"{ARTIFACT_DIR}/label_encoders.pkl")
 
     with open(f"{ARTIFACT_DIR}/feature_cols.json", "w") as f:
@@ -266,10 +265,9 @@ def main():
     test_df.to_csv(f"{ARTIFACT_DIR}/test_predictions_sample.csv", index=False)
 
     print(f"\nAll artifacts saved to: {ARTIFACT_DIR}")
-    print("Files: xgb_demand_model.pkl, label_encoders.pkl, feature_cols.json,")
+    print("Files: xgb_demand_model.json, label_encoders.pkl, feature_cols.json,")
     print("       metrics.json, feature_importance.csv, historical_engineered.parquet,")
     print("       test_predictions_sample.csv")
-    print("\n>>> Zip the artifacts folder and download it to use with the Streamlit app <<<")
 
 
 if __name__ == "__main__":

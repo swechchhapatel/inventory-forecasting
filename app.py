@@ -4,7 +4,7 @@ Store Stock Assistant
 Run with: streamlit run app.py
 
 Expects trained model artifacts in ./artifacts/ (produced by src/train_model.py):
-  - xgb_demand_model.pkl
+  - xgb_demand_model.json
   - label_encoders.pkl
   - feature_cols.json
   - metrics.json
@@ -158,7 +158,9 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # -----------------------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
-    model = joblib.load(os.path.join(ARTIFACT_DIR, "xgb_demand_model.pkl"))
+    import xgboost as xgb
+    model = xgb.XGBRegressor()
+    model.load_model(os.path.join(ARTIFACT_DIR, "xgb_demand_model.json"))
     encoders = joblib.load(os.path.join(ARTIFACT_DIR, "label_encoders.pkl"))
     with open(os.path.join(ARTIFACT_DIR, "feature_cols.json")) as f:
         feature_cols = json.load(f)
@@ -306,7 +308,7 @@ with st.sidebar.expander("⚙️ Restocking preferences", expanded=False):
     critical_days = st.slider("Warn urgently when days left is under", 1, 10, 3)
     warning_days = st.slider("Give a heads-up when days left is under", 2, 21, 7)
 
-if not os.path.exists(os.path.join(ARTIFACT_DIR, "xgb_demand_model.pkl")):
+if not os.path.exists(os.path.join(ARTIFACT_DIR, "xgb_demand_model.json")):
     st.error(
         "No trained model found in `./artifacts/`. Run `src/train_model.py` in "
         "Kaggle/Colab first, then place the downloaded `artifacts/` folder next to "
